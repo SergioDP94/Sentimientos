@@ -1,14 +1,30 @@
-import streamlit as st
-import joblib
-import pandas as pd
+import re
+import html
 
+import joblib
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
+
+from sentence_transformers import SentenceTransformer
+
+
+# ============================================================
+# CONFIGURACIÓN
+# ============================================================
 
 st.set_page_config(
-    page_title="Análisis de Sentimientos IMDb",
+    page_title="Análisis de Sentimientos con Embeddings",
     page_icon="🎬",
     layout="wide"
 )
 
+
+# ============================================================
+# ESTILOS
+# ============================================================
 
 st.markdown(
     """
@@ -47,13 +63,11 @@ st.markdown(
             font-size: 14px;
         }
 
-        .palabra-clave {
-            display: inline-block;
-            padding: 6px 10px;
-            margin: 4px;
-            border-radius: 10px;
-            background: #f2f2f2;
-            font-size: 14px;
+        .caja-explicacion {
+            padding: 14px 16px;
+            border: 1px solid #dddddd;
+            border-radius: 12px;
+            margin-top: 8px;
         }
     </style>
     """,
@@ -61,104 +75,224 @@ st.markdown(
 )
 
 
+# ============================================================
+# CARGA
+# ============================================================
+
 @st.cache_resource
-def cargar_modelo():
-    return joblib.load("modelo_sentimientos_imdb.pkl")
+def cargar_archivo_modelo():
+    return joblib.load(
+        "modelo_sentimientos_imdb.pkl"
+    )
 
 
-modelo = cargar_modelo()
+modelo = cargar_archivo_modelo()
+
+clasificador = modelo["clasificador"]
+nombre_embedding = modelo["embedding_model_name"]
+dimension_embedding = modelo["dimension_embedding"]
+pca = modelo["pca"]
+
+embeddings_referencia = modelo[
+    "embeddings_referencia"
+]
+
+proyeccion_referencia = modelo[
+    "proyeccion_referencia"
+]
+
+textos_referencia = modelo[
+    "textos_referencia"
+]
+
+sentimientos_referencia = modelo[
+    "sentimientos_referencia"
+]
+
+centroides = modelo[
+    "centroides"
+]
 
 
-def obtener_componentes(modelo_pipeline):
-    vectorizador = modelo_pipeline.named_steps["vectorizador"]
-    clasificador = modelo_pipeline.named_steps["clasificador"]
-    return vectorizador, clasificador
+@st.cache_resource
+def cargar_sentence_transformer(nombre):
+    return SentenceTransformer(
+        nombre
+    )
 
 
-def analizar_palabras(texto, modelo_pipeline, cantidad=10):
-    vectorizador, clasificador = obtener_componentes(modelo_pipeline)
+modelo_embedding = cargar_sentence_transformer(
+    nombre_embedding
+)
 
-    matriz_tfidf = vectorizador.transform([texto])
-    nombres = vectorizador.get_feature_names_out()
-    coeficientes = clasificador.coef_[0]
 
-    indices_presentes = matriz_tfidf.nonzero()[1]
+# ============================================================
+# FUNCIONES
+# ============================================================
+
+def generar_embedding(texto):
+    return modelo_embedding.encode(
+        [texto],
+        normalize_embeddings=True,
+        convert_to_numpy=True
+    ).astype("float32")
+
+
+def limpiar_texto_visual(texto, longitud=160):
+    texto = re.sub(
+        r"<[^>]+>",
+        " ",
+        str(texto)
+    )
+
+    texto = re.sub(
+        r"\s+",
+        " ",
+        texto
+    ).strip()
+
+    if len(texto) > longitud:
+        texto = texto[:longitud] + "..."
+
+    return texto
+
+
+def obtener_vecinos(embedding, cantidad=8):
+
+    vector = embedding[0]
+
+    # Los embeddings están normalizados.
+    # El producto punto equivale a similitud coseno.
+    similitudes = embeddings_referencia @ vector
+
+    indices = np.argsort(
+        similitudes
+    )[::-1][:cantidad]
 
     filas = []
 
-    for indice in indices_presentes:
-        valor_tfidf = float(matriz_tfidf[0, indice])
-        peso_modelo = float(coeficientes[indice])
-        contribucion = valor_tfidf * peso_modelo
-
+    for posicion, indice in enumerate(
+        indices,
+        start=1
+    ):
         filas.append(
             {
-                "Palabra": nombres[indice],
-                "TF-IDF": valor_tfidf,
-                "Peso del modelo": peso_modelo,
-                "Contribución": contribucion,
+                "N.º": posicion,
+                "Reseña": limpiar_texto_visual(
+                    textos_referencia[indice]
+                ),
+                "Sentimiento": str(
+                    sentimientos_referencia[indice]
+                ).capitalize(),
+                "Similitud": float(
+                    similitudes[indice]
+                )
             }
         )
 
-    if not filas:
-        return pd.DataFrame(
-            columns=["Palabra", "TF-IDF", "Peso del modelo", "Contribución"]
+    return pd.DataFrame(
+        filas
+    ), indices, similitudes[indices]
+
+
+def similitud_centroides(embedding):
+
+    vector = embedding[0]
+
+    filas = []
+
+    for clase, centroide in centroides.items():
+
+        similitud = float(
+            np.dot(
+                vector,
+                centroide
+            )
         )
 
-    df = pd.DataFrame(filas)
-    df["Influencia absoluta"] = df["Contribución"].abs()
+        filas.append(
+            {
+                "Sentimiento": str(
+                    clase
+                ).capitalize(),
+                "Similitud": similitud
+            }
+        )
 
-    df = (
-        df.sort_values("Influencia absoluta", ascending=False)
-        .head(cantidad)
-        .drop(columns="Influencia absoluta")
+    return pd.DataFrame(
+        filas
     )
 
-    return df
 
+# ============================================================
+# SIDEBAR
+# ============================================================
 
 with st.sidebar:
-    st.header("ℹ️ Sobre la aplicación")
 
-    st.write(
-        "Esta aplicación clasifica reseñas de películas en inglés "
-        "como positivas o negativas."
+    st.header(
+        "ℹ️ Sobre la aplicación"
     )
 
-    st.markdown("**Modelo utilizado**")
-    st.write("TF-IDF + LinearSVC")
+    st.write(
+        "La reseña se transforma en un embedding semántico "
+        "y luego se clasifica como positiva o negativa."
+    )
 
-    st.markdown("**Fuente de entrenamiento**")
-    st.write("IMDb Dataset")
+    st.markdown(
+        "**Embedding**"
+    )
+    st.write(
+        "all-MiniLM-L6-v2"
+    )
 
-    st.markdown("**Salida del modelo**")
-    st.write("Positive / Negative")
+    st.markdown(
+        "**Dimensión original**"
+    )
+    st.write(
+        f"{dimension_embedding} dimensiones"
+    )
+
+    st.markdown(
+        "**Clasificador**"
+    )
+    st.write(
+        "LinearSVC"
+    )
 
     st.divider()
 
     st.caption(
-        "El margen de decisión del SVM no representa una probabilidad. "
-        "Indica qué tan lejos se encuentra el texto de la frontera de clasificación."
+        "PCA se utiliza únicamente para representar los embeddings "
+        "en dos dimensiones. El clasificador continúa trabajando "
+        "con el vector completo."
     )
 
 
-st.title("🎬 Análisis de Sentimientos de Reseñas")
+# ============================================================
+# ENTRADA
+# ============================================================
+
+st.title(
+    "🎬 Análisis de Sentimientos con Embeddings"
+)
 
 st.write(
-    "Ingresa una reseña de una película en inglés. "
-    "La aplicación determinará si el sentimiento es positivo o negativo "
-    "y mostrará qué palabras tuvieron mayor influencia en la clasificación."
+    "Ingresa una reseña en inglés. Además de predecir su sentimiento, "
+    "la aplicación mostrará cómo se representa semánticamente y qué "
+    "reseñas del espacio de embeddings son más parecidas."
 )
 
 
 texto = st.text_area(
     "Escribe la reseña:",
-    height=180,
+    height=170,
     placeholder=(
-        "Ejemplo: This movie was amazing. "
+        "This movie was amazing. "
         "The story was excellent and the actors were great."
     )
 )
+
 
 analizar = st.button(
     "🔎 Analizar sentimiento",
@@ -167,143 +301,400 @@ analizar = st.button(
 )
 
 
+# ============================================================
+# ANÁLISIS
+# ============================================================
+
 if analizar:
 
     if texto.strip() == "":
-        st.warning("Por favor, escribe una reseña antes de realizar el análisis.")
+
+        st.warning(
+            "Por favor, escribe una reseña."
+        )
 
     else:
-        prediccion = modelo.predict([texto])[0]
 
-        vectorizador, clasificador = obtener_componentes(modelo)
-        margen = float(modelo.decision_function([texto])[0])
+        embedding = generar_embedding(
+            texto
+        )
 
-        clase_negativa = str(clasificador.classes_[0])
-        clase_positiva = str(clasificador.classes_[1])
+        prediccion = clasificador.predict(
+            embedding
+        )[0]
+
+        margen = float(
+            clasificador.decision_function(
+                embedding
+            )[0]
+        )
+
+        nueva_proyeccion = pca.transform(
+            embedding
+        )[0]
+
+
+        # ====================================================
+        # RESULTADO
+        # ====================================================
 
         st.divider()
 
         if str(prediccion).lower() == "positive":
+
             st.markdown(
                 """
                 <div class="resultado-positivo">
-                    <div class="titulo-resultado">😊 SENTIMIENTO POSITIVO</div>
-                    <div class="subtitulo">
-                        El modelo interpreta la reseña como predominantemente positiva.
+                    <div class="titulo-resultado">
+                        😊 SENTIMIENTO POSITIVO
                     </div>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-        else:
-            st.markdown(
-                """
-                <div class="resultado-negativo">
-                    <div class="titulo-resultado">🙁 SENTIMIENTO NEGATIVO</div>
                     <div class="subtitulo">
-                        El modelo interpreta la reseña como predominantemente negativa.
+                        La reseña fue clasificada como positiva.
                     </div>
                 </div>
                 """,
                 unsafe_allow_html=True
             )
 
-        col1, col2, col3 = st.columns(3)
+        else:
+
+            st.markdown(
+                """
+                <div class="resultado-negativo">
+                    <div class="titulo-resultado">
+                        🙁 SENTIMIENTO NEGATIVO
+                    </div>
+                    <div class="subtitulo">
+                        La reseña fue clasificada como negativa.
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+
+        col1, col2, col3 = st.columns(
+            3
+        )
 
         with col1:
             st.metric(
                 "Clasificación",
-                str(prediccion).upper()
+                str(
+                    prediccion
+                ).upper()
             )
 
         with col2:
             st.metric(
-                "Margen de decisión",
+                "Margen SVM",
                 f"{margen:.3f}"
             )
 
         with col3:
             st.metric(
-                "Palabras ingresadas",
-                len(texto.split())
+                "Dimensiones",
+                dimension_embedding
             )
 
-        st.caption(
-            f"En este modelo, un margen mayor que 0 favorece «{clase_positiva}» "
-            f"y un margen menor que 0 favorece «{clase_negativa}»."
+
+        # ====================================================
+        # TABS
+        # ====================================================
+
+        tab1, tab2, tab3, tab4 = st.tabs(
+            [
+                "🗺️ Mapa semántico",
+                "🔎 Reseñas similares",
+                "🎯 Comparación por sentimiento",
+                "🧬 Vector del embedding"
+            ]
         )
 
-        st.subheader("🔑 Palabras con mayor influencia")
 
-        importancia = analizar_palabras(
-            texto,
-            modelo,
-            cantidad=10
-        )
+        # ====================================================
+        # TAB 1: MAPA PCA
+        # ====================================================
 
-        if importancia.empty:
-            st.info(
-                "No se encontraron términos reconocidos por el vocabulario "
-                "TF-IDF del modelo."
+        with tab1:
+
+            st.subheader(
+                "Mapa semántico en 2 dimensiones"
             )
 
-        else:
-            etiquetas = " ".join(
-                f'<span class="palabra-clave">{palabra}</span>'
-                for palabra in importancia["Palabra"].tolist()
+            df_mapa = pd.DataFrame(
+                {
+                    "PCA 1": proyeccion_referencia[:, 0],
+                    "PCA 2": proyeccion_referencia[:, 1],
+                    "Sentimiento": [
+                        str(x).capitalize()
+                        for x in sentimientos_referencia
+                    ],
+                    "Reseña": [
+                        limpiar_texto_visual(
+                            x,
+                            longitud=100
+                        )
+                        for x in textos_referencia
+                    ]
+                }
             )
 
-            st.markdown(
-                etiquetas,
-                unsafe_allow_html=True
+            fig = px.scatter(
+                df_mapa,
+                x="PCA 1",
+                y="PCA 2",
+                color="Sentimiento",
+                hover_data={
+                    "Reseña": True,
+                    "PCA 1": ":.3f",
+                    "PCA 2": ":.3f"
+                },
+                opacity=0.55,
+                title=(
+                    "Distribución de reseñas en el espacio de embeddings"
+                )
             )
 
-            st.write("")
-
-            st.subheader("📊 Influencia de las palabras en la decisión")
-
-            grafico = importancia[
-                ["Palabra", "Contribución"]
-            ].copy()
-
-            grafico = grafico.sort_values(
-                "Contribución",
-                ascending=True
+            fig.add_trace(
+                go.Scatter(
+                    x=[nueva_proyeccion[0]],
+                    y=[nueva_proyeccion[1]],
+                    mode="markers",
+                    name="Nueva reseña",
+                    marker=dict(
+                        size=18,
+                        symbol="star",
+                        color="black",
+                        line=dict(
+                            width=1,
+                            color="white"
+                        )
+                    ),
+                    hovertemplate=(
+                        "<b>Nueva reseña</b><extra></extra>"
+                    )
+                )
             )
 
-            st.bar_chart(
-                grafico.set_index("Palabra"),
-                horizontal=True
+            fig.update_layout(
+                height=620
+            )
+
+            st.plotly_chart(
+                fig,
+                use_container_width=True
             )
 
             st.caption(
-                f"Valores positivos empujan la predicción hacia «{clase_positiva}». "
-                f"Valores negativos la empujan hacia «{clase_negativa}»."
+                "PCA reduce los 384 valores del embedding a dos ejes "
+                "para poder observar visualmente la posición relativa "
+                "de las reseñas. La estrella representa el texto ingresado."
             )
 
-            with st.expander("Ver detalle técnico"):
-                tabla = importancia.copy()
 
-                tabla["TF-IDF"] = tabla["TF-IDF"].round(4)
-                tabla["Peso del modelo"] = tabla["Peso del modelo"].round(4)
-                tabla["Contribución"] = tabla["Contribución"].round(4)
+        # ====================================================
+        # TAB 2: VECINOS
+        # ====================================================
 
-                st.dataframe(
-                    tabla,
-                    use_container_width=True,
-                    hide_index=True
+        with tab2:
+
+            st.subheader(
+                "Reseñas semánticamente más cercanas"
+            )
+
+            df_vecinos, indices_vecinos, similitudes = obtener_vecinos(
+                embedding,
+                cantidad=8
+            )
+
+            grafico_vecinos = df_vecinos.copy()
+
+            grafico_vecinos[
+                "Etiqueta"
+            ] = [
+                f"Reseña {i}"
+                for i in grafico_vecinos["N.º"]
+            ]
+
+            fig_vecinos = px.bar(
+                grafico_vecinos.sort_values(
+                    "Similitud"
+                ),
+                x="Similitud",
+                y="Etiqueta",
+                orientation="h",
+                color="Sentimiento",
+                range_x=[
+                    max(
+                        0,
+                        float(
+                            grafico_vecinos[
+                                "Similitud"
+                            ].min()
+                        ) - 0.05
+                    ),
+                    1
+                ],
+                title="Similitud coseno con la nueva reseña"
+            )
+
+            fig_vecinos.update_layout(
+                height=450
+            )
+
+            st.plotly_chart(
+                fig_vecinos,
+                use_container_width=True
+            )
+
+            tabla_vecinos = df_vecinos.copy()
+
+            tabla_vecinos[
+                "Similitud"
+            ] = tabla_vecinos[
+                "Similitud"
+            ].round(4)
+
+            st.dataframe(
+                tabla_vecinos,
+                use_container_width=True,
+                hide_index=True
+            )
+
+            st.caption(
+                "Una similitud más cercana a 1 indica que las reseñas "
+                "están más próximas dentro del espacio semántico."
+            )
+
+
+        # ====================================================
+        # TAB 3: CENTROIDES
+        # ====================================================
+
+        with tab3:
+
+            st.subheader(
+                "Cercanía semántica a cada sentimiento"
+            )
+
+            df_centroides = similitud_centroides(
+                embedding
+            )
+
+            fig_centroides = px.bar(
+                df_centroides,
+                x="Sentimiento",
+                y="Similitud",
+                color="Sentimiento",
+                text_auto=".3f",
+                title=(
+                    "Similitud de la reseña con el centro "
+                    "semántico de cada clase"
                 )
+            )
 
-                st.write(
-                    "**Interpretación:** la contribución se calcula multiplicando "
-                    "el valor TF-IDF que tiene una palabra en la reseña por el peso "
-                    "que LinearSVC aprendió para esa palabra durante el entrenamiento."
+            fig_centroides.update_layout(
+                showlegend=False,
+                height=430
+            )
+
+            st.plotly_chart(
+                fig_centroides,
+                use_container_width=True
+            )
+
+            st.caption(
+                "Cada barra compara el embedding de la nueva reseña "
+                "con el embedding promedio de las reseñas positivas "
+                "y negativas del conjunto de entrenamiento."
+            )
+
+
+        # ====================================================
+        # TAB 4: VECTOR
+        # ====================================================
+
+        with tab4:
+
+            st.subheader(
+                "Perfil del embedding"
+            )
+
+            vector = embedding[0]
+
+            cantidad = min(
+                80,
+                len(vector)
+            )
+
+            df_vector = pd.DataFrame(
+                {
+                    "Dimensión": np.arange(
+                        1,
+                        cantidad + 1
+                    ),
+                    "Valor": vector[
+                        :cantidad
+                    ]
+                }
+            )
+
+            fig_vector = px.line(
+                df_vector,
+                x="Dimensión",
+                y="Valor",
+                markers=False,
+                title=(
+                    f"Primeras {cantidad} dimensiones "
+                    "del vector generado"
                 )
+            )
+
+            fig_vector.update_layout(
+                height=430
+            )
+
+            st.plotly_chart(
+                fig_vector,
+                use_container_width=True
+            )
+
+            st.caption(
+                "Cada dimensión es una característica latente aprendida "
+                "por el modelo. No debe interpretarse de forma aislada; "
+                "el significado aparece en el patrón completo del vector."
+            )
+
+
+        # ====================================================
+        # FLUJO
+        # ====================================================
+
+        st.divider()
+
+        st.subheader(
+            "🔄 Flujo del modelo"
+        )
+
+        st.code(
+            """
+Reseña
+   ↓
+SentenceTransformer
+   ↓
+Embedding de 384 dimensiones
+   ├──→ PCA → mapa semántico
+   ├──→ similitud coseno → vecinos
+   └──→ LinearSVC → Positive / Negative
+            """,
+            language=None
+        )
 
 
 st.divider()
 
 st.caption(
-    "Proyecto de clasificación de sentimientos utilizando "
-    "Procesamiento de Lenguaje Natural y Machine Learning."
+    "Proyecto de clasificación de sentimientos con embeddings, "
+    "visualización semántica y Machine Learning."
 )

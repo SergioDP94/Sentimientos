@@ -1,5 +1,7 @@
 streamlit
-joblib
+sentence-transformers
 scikit-learn
+joblib
 pandas
 numpy
+plotly
