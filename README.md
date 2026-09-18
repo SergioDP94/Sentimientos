@@ -46,10 +46,8 @@ El proyecto sigue un pipeline de Ciencia de Datos:
     ├── requirements.txt
     │
     ├── notebooks/
-    │   └── Analisis_Exploratorio_Visual_Analytics_IMDb.ipynb
-    │
-    └── data/
-        └── IMDB Dataset.csv
+        └── Analisis_Exploratorio_Visual_Analytics_IMDb.ipynb
+
 
 ## Aplicación Streamlit
 
